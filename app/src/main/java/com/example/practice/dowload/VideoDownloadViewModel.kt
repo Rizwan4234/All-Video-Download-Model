@@ -7,12 +7,16 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.practice.api.RetrofitInstance
 import com.example.practice.model.DownloadState
+import com.example.practice.model.DownloadTaskUi
 import com.example.practice.model.DownloadedVideo
 import com.example.practice.model.HomeScreenUiState
 import com.example.practice.practice.getHighestResolutionFormat
 import com.example.practice.practice.getInternalVideos
+import com.example.practice.utils.TaskStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -24,7 +28,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class VideoDownloadViewModel(application: Application) : AndroidViewModel(application) {
-    private val _screenState = MutableStateFlow(HomeScreenUiState())
+    /*private val _screenState = MutableStateFlow(HomeScreenUiState())
     val screenState = _screenState.asStateFlow()
     fun startDownload(context: Context, link: String) {
         viewModelScope.launch {
@@ -188,5 +192,134 @@ class VideoDownloadViewModel(application: Application) : AndroidViewModel(applic
                 Log.e("VideoVM", "Delete failed", e)
             }
         }
+    }*/
+
+    // ---------------- UI STATE ----------------
+    private val _screenState = MutableStateFlow(HomeScreenUiState())
+    val screenState = _screenState.asStateFlow()
+
+    private val downloadQueue = ArrayDeque<DownloadTaskUi>()
+    private var isDownloading = false
+
+    // -------------------- ENQUEUE DOWNLOAD --------------------
+    fun enqueueDownload(context: Context, link: String) {
+        val task = DownloadTaskUi(
+            id = System.currentTimeMillis().toString(),
+            originalUrl = link
+        )
+
+        downloadQueue.addLast(task)
+        _screenState.update { it.copy(tasks = it.tasks + task) }
+
+        if (!isDownloading) startNextDownload(context)
     }
+
+    // -------------------- START NEXT --------------------
+    private fun startNextDownload(context: Context) {
+        val task = downloadQueue.removeFirstOrNull() ?: return
+        isDownloading = true
+        updateTask(task.id) { it.copy(status = TaskStatus.DOWNLOADING, progress = 0) }
+        val job = viewModelScope.launch {
+            val isTikTok = task.originalUrl.contains("tiktok.com", ignoreCase = true)
+            try {
+                if (isTikTok) startTikTokDownload(context, task)
+                else startNormalDownload(context, task)
+            } catch (e: Exception) {
+                markFailed(task.id)
+                finishAndMoveNext(context)
+            }
+        }
+        updateTask(task.id) { it.copy(job = job) }
+    }
+
+    // -------------------- NORMAL --------------------
+    private suspend fun startNormalDownload(context: Context, task: DownloadTaskUi) {
+        val response = RetrofitInstance.api.fetchVideoInfo(task.originalUrl)
+        val format = response.getHighestResolutionFormat() ?: throw Exception("No format")
+        downloadFile(context, format.url, response.title, task.id)
+    }
+
+    // -------------------- TIKTOK --------------------
+    private suspend fun startTikTokDownload(context: Context, task: DownloadTaskUi) {
+    //    val finalUrl = "http://159.203.143.191/download?url=${task.originalUrl}"
+        val finalUrl = "https://redhole.cofencode.com/download?url=${task.originalUrl}"
+        downloadFile(context, finalUrl, System.currentTimeMillis().toString(), task.id)
+    }
+
+    // -------------------- DOWNLOAD FILE --------------------
+    private suspend fun downloadFile(context: Context, url: String, title: String, taskId: String) = withContext(Dispatchers.IO) {
+        try {
+            val file = File(context.filesDir, "Videos/$title.mp4")
+            file.parentFile?.mkdirs()
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connect()
+
+            val total = conn.contentLengthLong
+            val input = conn.inputStream
+            val output = FileOutputStream(file)
+
+            val buffer = ByteArray(8 * 1024)
+            var downloaded = 0L
+            var read: Int
+
+            while (input.read(buffer).also { read = it } != -1) {
+                ensureActive()
+                output.write(buffer, 0, read)
+                downloaded += read
+                val progress = ((downloaded * 100) / total).toInt().coerceIn(0, 100)
+                withContext(Dispatchers.Main) { updateTaskProgress(taskId, progress) }
+            }
+
+            output.close()
+            input.close()
+            conn.disconnect()
+
+            withContext(Dispatchers.Main) { finishTask(taskId, context) }
+
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) { markFailed(taskId); finishAndMoveNext(context) }
+        }
+    }
+
+    // -------------------- TASK HELPERS --------------------
+    private fun updateTask(taskId: String, update: (DownloadTaskUi) -> DownloadTaskUi) {
+        _screenState.update { state ->
+            state.copy(tasks = state.tasks.map { if (it.id == taskId) update(it) else it })
+        }
+    }
+
+    private fun updateTaskProgress(taskId: String, progress: Int) {
+        updateTask(taskId) { it.copy(progress = progress) }
+    }
+
+    private fun markFailed(taskId: String) {
+        _screenState.update { state ->
+            state.copy(tasks = state.tasks.filter { it.id != taskId })
+        }
+    }
+
+    fun cancelTask(taskId: String) {
+        val task = _screenState.value.tasks.find { it.id == taskId } ?: return
+        task.job?.cancel()
+        downloadQueue.removeIf { it.id == taskId }
+
+        _screenState.update { state ->
+            state.copy(tasks = state.tasks.filter { it.id != taskId })
+        }
+
+        finishAndMoveNext(getApplication())
+    }
+
+    private fun finishTask(taskId: String, context: Context) {
+        updateTask(taskId) { it.copy(progress = 100, status = TaskStatus.COMPLETED) }
+        _screenState.update { it.copy(tasks = it.tasks.filter { it.id != taskId }) }
+        finishAndMoveNext(context)
+    }
+
+    private fun finishAndMoveNext(context: Context) {
+        isDownloading = false
+        if (downloadQueue.isNotEmpty()) startNextDownload(context)
+        _screenState.update { it.copy(currentVideosList = context.getInternalVideos()) }
+    }
+
 }

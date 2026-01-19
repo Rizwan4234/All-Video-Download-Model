@@ -13,7 +13,6 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.practice.practice.HomesScreen
 import com.example.practice.practice.ScreenB
-import com.example.practice.practice.Testing
 import com.example.practice.practice.VideoListScreen
 import com.example.practice.practice.VideoPlayerItem
 

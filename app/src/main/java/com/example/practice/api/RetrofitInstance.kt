@@ -12,7 +12,8 @@ object RetrofitInstance {
     private val client = OkHttpClient.Builder().build()
 
     val api: VideoApi = Retrofit.Builder()
-        .baseUrl("http://159.203.143.191/")
+      //  .baseUrl("http://159.203.143.191/")
+        .baseUrl("https://redhole.cofencode.com/")
         .client(client)
         .addConverterFactory(GsonConverterFactory.create())
         .build()
